@@ -27,6 +27,7 @@ import (
 type Config struct {
 	KubeConfig            string
 	ContextName           string
+	Output                string
 	Namespaces            []string
 	PodQuery              *regexp.Regexp
 	ExcludePodQuery       *regexp.Regexp
