@@ -17,6 +17,7 @@ package stern
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -24,6 +25,33 @@ import (
 	"github.com/stern/stern/kubernetes"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 )
+
+var files = make(map[string]*os.File)
+var filesLock sync.RWMutex
+
+func setFile(targetID string, file *os.File) {
+	filesLock.Lock()
+	defer filesLock.Unlock()
+	files[targetID] = file
+}
+
+func closeFile(targetID string) {
+	filesLock.Lock()
+	defer filesLock.Unlock()
+	if file, ok := files[targetID]; ok {
+		file.Close()
+	}
+	delete(files, targetID)
+}
+
+func closeAllFiles() {
+	filesLock.Lock()
+	defer filesLock.Unlock()
+	for targetID, file := range files {
+		file.Close()
+		delete(files, targetID)
+	}
+}
 
 var tails = make(map[string]*Tail)
 var tailLock sync.RWMutex
@@ -124,16 +152,32 @@ func Run(ctx context.Context, config *Config) error {
 		for p := range added {
 			targetID := p.GetID()
 
+			var out io.Writer
+			if config.Output == "" {
+				out = os.Stdout
+			} else {
+				file, err := os.Create(config.Output + "/" + p.Pod + ".log")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "unexpected error: %v\n", err)
+					return
+				}
+				out = file
+				setFile(targetID, file)
+			}
+
 			if tail, ok := getTail(targetID); ok {
 				if tail.isActive() {
 					continue
 				} else {
 					tail.Close()
 					clearTail(targetID)
+					if config.Output != "" {
+						closeFile(targetID)
+					}
 				}
 			}
 
-			tail := NewTail(clientset, p.Node, p.Namespace, p.Pod, p.Container, config.Template, os.Stdout, os.Stderr, &TailOptions{
+			tail := NewTail(clientset, p.Node, p.Namespace, p.Pod, p.Container, config.Template, out, os.Stderr, &TailOptions{
 				Timestamps:   config.Timestamps,
 				Location:     config.Location,
 				SinceSeconds: int64(config.Since.Seconds()),
@@ -151,6 +195,10 @@ func Run(ctx context.Context, config *Config) error {
 			}(tail)
 		}
 	}()
+	// close all open files
+	if config.Output != "" {
+		defer closeAllFiles()
+	}
 
 	go func() {
 		for p := range removed {
@@ -158,6 +206,9 @@ func Run(ctx context.Context, config *Config) error {
 			if tail, ok := getTail(targetID); ok {
 				tail.Close()
 				clearTail(targetID)
+				if config.Output != "" {
+					closeFile(targetID)
+				}
 			}
 		}
 	}()

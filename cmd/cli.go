@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"regexp"
 	"text/template"
 	"time"
@@ -63,6 +64,7 @@ type Options struct {
 	completion       string
 	template         string
 	output           string
+	format           string
 }
 
 var opts = &Options{
@@ -74,7 +76,7 @@ var opts = &Options{
 	tail:           -1,
 	color:          "auto",
 	template:       "",
-	output:         "default",
+	format:         "default",
 }
 
 func Run() {
@@ -104,8 +106,9 @@ func Run() {
 	cmd.Flags().StringVar(&opts.color, "color", opts.color, "Color output. Can be 'always', 'never', or 'auto'")
 	cmd.Flags().BoolVarP(&opts.version, "version", "v", opts.version, "Print the version and exit")
 	cmd.Flags().StringVar(&opts.completion, "completion", opts.completion, "Outputs stern command-line completion code for the specified shell. Can be 'bash' or 'zsh'")
-	cmd.Flags().StringVar(&opts.template, "template", opts.template, "Template to use for log lines, leave empty to use --output flag")
-	cmd.Flags().StringVarP(&opts.output, "output", "o", opts.output, "Specify predefined template. Currently support: [default, raw, json]")
+	cmd.Flags().StringVar(&opts.template, "template", opts.template, "Template to use for log lines, leave empty to use --format flag")
+	cmd.Flags().StringVarP(&opts.format, "format", "f", opts.format, "Specify predefined template. Currently support: [default, raw, json]")
+	cmd.Flags().StringVar(&opts.output, "output", opts.output, "Folder to tail log to. Default using stdout.")
 
 	// Specify custom bash completion function
 	cmd.BashCompletionFunction = bash_completion_func
@@ -141,8 +144,21 @@ func Run() {
 			os.Exit(2)
 		}
 
+		// trap Ctrl+C and call cancel on the context
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		defer func() {
+			signal.Stop(c)
+			cancel()
+		}()
+		go func() {
+			select {
+			case <-c:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 
 		err = stern.Run(ctx, config)
 		if err != nil {
@@ -252,7 +268,7 @@ func parseConfig(args []string) (*stern.Config, error) {
 
 	t := opts.template
 	if t == "" {
-		switch opts.output {
+		switch opts.format {
 		case "default":
 			if color.NoColor {
 				t = "{{.PodName}} {{.ContainerName}} {{.Message}}"
@@ -317,6 +333,12 @@ func parseConfig(args []string) (*stern.Config, error) {
 		return nil, err
 	}
 
+	var output string
+	if opts.output != "" {
+		os.Mkdir(opts.output, 0777)
+		output = opts.output
+	}
+
 	return &stern.Config{
 		KubeConfig:            opts.kubeConfig,
 		PodQuery:              pod,
@@ -336,6 +358,7 @@ func parseConfig(args []string) (*stern.Config, error) {
 		FieldSelector:         fieldSelector,
 		TailLines:             tailLines,
 		Template:              template,
+		Output:                output,
 	}, nil
 }
 
